@@ -672,9 +672,9 @@ __DEVICE__ float agx_scale(float limit_x, float limit_y, float transition_x, flo
 {
   const float projected_rise = slope * _fmaxf(AGX_EPSILON, limit_x - transition_x);
   const float actual_rise = _fmaxf(AGX_EPSILON, limit_y - transition_y);
-  const float transformed_projected_rise = _powf(projected_rise, -power);
-  const float transformed_actual_rise = _powf(actual_rise, -power);
-  const float base = _fmaxf(AGX_EPSILON, transformed_actual_rise - transformed_projected_rise);
+  const float powered_projected_rise = _powf(projected_rise, -power);
+  const float powered_actual_rise = _powf(actual_rise, -power);
+  const float base = _fmaxf(AGX_EPSILON, powered_actual_rise - powered_projected_rise);
   const float scale_value = _powf(base, -1.0f / power);
   return _fminf(1e9f, scale_value);
 }

@@ -61,6 +61,11 @@ def lint(text):
         for ident in re.finditer(r"\b(?:float[23]?|int|agx_\w+)\s+(\w+)\s*[=;,)]", code):
             if ident.group(1) in RESERVED:
                 errors.append(f"linea {i}: nombre reservado en OpenCL/Metal: {ident.group(1)}")
+    # Resolve halla la funcion principal buscando el texto "transform": si aparece antes en otro
+    # lado, cuenta los argumentos de lo que siga y falla con "wrong number of arguments".
+    hits = [i for i, line in enumerate(text.splitlines(), 1) if "transform" in line.lower()]
+    if len(hits) != 1:
+        errors.append(f"lineas {hits}: el texto 'transform' solo puede aparecer en la firma de transform()")
     return errors
 
 
