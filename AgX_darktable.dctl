@@ -1,0 +1,1284 @@
+// AgX de darktable para DaVinci Resolve
+//
+// Port a DCTL del modulo AgX de darktable 5.6.2 (src/iop/agx.c, parametros v7).
+// Misma matematica, mismos parametros y mismos presets. Esta validado contra el
+// codigo de darktable compilado como C: ver test/ y el README.
+//
+// Entra DaVinci Wide Gamut / DaVinci Intermediate (o lineal) y sale para display.
+// Los sliders usan las mismas unidades que la interfaz de darktable: EV, porcentaje
+// y grados. Con "preset" en "use sliders" mandan los sliders; cualquier otro preset
+// los ignora (salvo input, exposure, output y show curve).
+//
+// AgX: Copyright (C) 2025-2026 darktable developers.
+// Port a DCTL: Copyright (C) 2026 Von Diego.
+// Licencia: GPL-3.0-or-later, igual que darktable. Ver LICENSE.
+
+DEFINE_UI_PARAMS(p_preset, preset, DCTLUI_COMBO_BOX, 0, {PRESET_SLIDERS, PRESET_SCENE_DEFAULT, PRESET_BLENDER_BASE, PRESET_BLENDER_PUNCHY, PRESET_SIGMOID_DEFAULT, PRESET_SIGMOID_SMOOTH, PRESET_SMOOTH, PRESET_UNMODIFIED}, {use sliders, scene-referred default, blender-like base, blender-like punchy, sigmoid-like default, sigmoid-like smooth, smooth, unmodified base primaries})
+DEFINE_UI_PARAMS(p_input, input, DCTLUI_COMBO_BOX, 0, {IN_DI_DWG, IN_LIN_DWG, IN_LIN_REC2020}, {DaVinci Intermediate DWG, Linear DWG, Linear Rec.2020})
+DEFINE_UI_PARAMS(p_exposure, exposure before AgX, DCTLUI_SLIDER_FLOAT, 0.0, -10.0, 10.0, 0.01)
+
+DEFINE_UI_PARAMS(p_white_ev, white relative exposure, DCTLUI_SLIDER_FLOAT, 6.5, 0.1, 20.0, 0.01)
+DEFINE_UI_PARAMS(p_black_ev, black relative exposure, DCTLUI_SLIDER_FLOAT, -10.0, -20.0, -0.1, 0.01)
+DEFINE_UI_PARAMS(p_pivot_ev, pivot relative exposure, DCTLUI_SLIDER_FLOAT, 0.0, -20.0, 20.0, 0.01)
+DEFINE_UI_PARAMS(p_pivot_out, pivot target output, DCTLUI_SLIDER_FLOAT, 18.0, 0.0, 100.0, 0.01)
+DEFINE_UI_PARAMS(p_contrast, contrast, DCTLUI_SLIDER_FLOAT, 3.0, 0.1, 10.0, 0.001)
+DEFINE_UI_PARAMS(p_shoulder_power, shoulder power, DCTLUI_SLIDER_FLOAT, 3.3, 0.0, 10.0, 0.001)
+DEFINE_UI_PARAMS(p_toe_power, toe power, DCTLUI_SLIDER_FLOAT, 1.5, 0.0, 10.0, 0.001)
+
+DEFINE_UI_PARAMS(p_look_slope, look slope, DCTLUI_SLIDER_FLOAT, 1.0, 0.0, 10.0, 0.001)
+DEFINE_UI_PARAMS(p_look_lift, look lift, DCTLUI_SLIDER_FLOAT, 0.0, -1.0, 1.0, 0.001)
+DEFINE_UI_PARAMS(p_look_brightness, look brightness, DCTLUI_SLIDER_FLOAT, 1.0, 0.0, 10.0, 0.001)
+DEFINE_UI_PARAMS(p_look_saturation, look saturation, DCTLUI_SLIDER_FLOAT, 100.0, 0.0, 1000.0, 0.01)
+DEFINE_UI_PARAMS(p_look_hue, look preserve hue, DCTLUI_SLIDER_FLOAT, 60.0, 0.0, 100.0, 0.01)
+
+DEFINE_UI_PARAMS(p_shoulder_start, shoulder start, DCTLUI_SLIDER_FLOAT, 0.0, 0.0, 100.0, 0.01)
+DEFINE_UI_PARAMS(p_target_white, target white, DCTLUI_SLIDER_FLOAT, 100.0, 20.0, 100.0, 0.01)
+DEFINE_UI_PARAMS(p_toe_start, toe start, DCTLUI_SLIDER_FLOAT, 0.0, 0.0, 100.0, 0.01)
+DEFINE_UI_PARAMS(p_target_black, target black, DCTLUI_SLIDER_FLOAT, 0.0, 0.0, 15.0, 0.001)
+DEFINE_UI_PARAMS(p_auto_gamma, keep the pivot on the diagonal, DCTLUI_CHECK_BOX, 0)
+DEFINE_UI_PARAMS(p_curve_gamma, curve y gamma, DCTLUI_SLIDER_FLOAT, 2.2, 0.01, 10.0, 0.001)
+
+DEFINE_UI_PARAMS(p_base, base primaries, DCTLUI_COMBO_BOX, 0, {BASE_REC2020, BASE_P3, BASE_ADOBE, BASE_SRGB}, {Rec2020, Display P3, Adobe RGB compatible, sRGB})
+DEFINE_UI_PARAMS(p_disable_primaries, disable adjustments, DCTLUI_CHECK_BOX, 0)
+DEFINE_UI_PARAMS(p_red_inset, red attenuation, DCTLUI_SLIDER_FLOAT, 29.462451, 0.0, 99.0, 0.001)
+DEFINE_UI_PARAMS(p_red_rotation, red rotation, DCTLUI_SLIDER_FLOAT, 2.028458, -30.0, 30.0, 0.001)
+DEFINE_UI_PARAMS(p_green_inset, green attenuation, DCTLUI_SLIDER_FLOAT, 25.861925, 0.0, 99.0, 0.001)
+DEFINE_UI_PARAMS(p_green_rotation, green rotation, DCTLUI_SLIDER_FLOAT, -1.208135, -30.0, 30.0, 0.001)
+DEFINE_UI_PARAMS(p_blue_inset, blue attenuation, DCTLUI_SLIDER_FLOAT, 14.641371, 0.0, 99.0, 0.001)
+DEFINE_UI_PARAMS(p_blue_rotation, blue rotation, DCTLUI_SLIDER_FLOAT, -3.612911, -30.0, 30.0, 0.001)
+DEFINE_UI_PARAMS(p_reverse_all, reverse all, DCTLUI_CHECK_BOX, 0)
+DEFINE_UI_PARAMS(p_master_outset, master purity boost, DCTLUI_SLIDER_FLOAT, 100.0, 0.0, 200.0, 0.01)
+DEFINE_UI_PARAMS(p_master_unrotation, master rotation reversal, DCTLUI_SLIDER_FLOAT, 0.0, 0.0, 200.0, 0.01)
+DEFINE_UI_PARAMS(p_red_outset, red purity boost, DCTLUI_SLIDER_FLOAT, 29.07764, 0.0, 99.0, 0.001)
+DEFINE_UI_PARAMS(p_red_unrotation, red reverse rotation, DCTLUI_SLIDER_FLOAT, 2.028458, -30.0, 30.0, 0.001)
+DEFINE_UI_PARAMS(p_green_outset, green purity boost, DCTLUI_SLIDER_FLOAT, 26.31554, 0.0, 99.0, 0.001)
+DEFINE_UI_PARAMS(p_green_unrotation, green reverse rotation, DCTLUI_SLIDER_FLOAT, -1.208135, -30.0, 30.0, 0.001)
+DEFINE_UI_PARAMS(p_blue_outset, blue purity boost, DCTLUI_SLIDER_FLOAT, 4.581072, 0.0, 99.0, 0.001)
+DEFINE_UI_PARAMS(p_blue_unrotation, blue reverse rotation, DCTLUI_SLIDER_FLOAT, -3.612911, -30.0, 30.0, 0.001)
+
+DEFINE_UI_PARAMS(p_output, output, DCTLUI_COMBO_BOX, 0, {OUT_REC709, OUT_SRGB, OUT_P3, OUT_REC2020, OUT_LINEAR}, {Rec.709 Gamma 2.4, sRGB, Display P3, Rec.2020 Gamma 2.4, Linear Rec.2020})
+DEFINE_UI_PARAMS(p_show_curve, show curve, DCTLUI_CHECK_BOX, 0)
+
+
+#define AGX_EPSILON 1E-6f
+#define AGX_DEFAULT_GAMMA 2.2f
+#define AGX_FLT_EPSILON 1.19209290e-7f
+#define AGX_FLT_MAX 3.40282347e+38f
+#define AGX_PI 3.14159265358979323846f
+
+// DaVinci Intermediate (DaVinci Wide Gamut Intermediate, Blackmagic Design)
+#define DI_A 0.0075f
+#define DI_B 7.0f
+#define DI_C 0.07329248f
+#define DI_M 10.44426855f
+#define DI_LOG_CUT 0.02740668f
+
+
+// Matriz 3x3 guardada transpuesta, como dt_colormatrix_t en darktable:
+// fila k = columna k de la matriz real. Asi el orden de las operaciones en
+// float es el mismo que en darktable.
+typedef struct
+{
+  float3 r0, r1, r2;
+} agx_mat;
+
+typedef struct
+{
+  float rx, ry, gx, gy, bx, by;  // primarios xy (adaptados a D50, como los da lcms2)
+  float wx, wy;                  // blanco xy (D50)
+  agx_mat xyz_to_base;           // matrix_out_transposed del perfil
+  agx_mat pipe_to_base;          // Rec2020 lineal -> base
+  agx_mat base_to_pipe;          // su inversa
+} agx_profile;
+
+// dt_iop_agx_params_t, sin dynamic_range_scaling (solo lo usa el gotero)
+typedef struct
+{
+  float look_lift, look_slope, look_brightness, look_saturation, look_original_hue_mix_ratio;
+  float range_black_relative_ev, range_white_relative_ev;
+  float curve_pivot_x, curve_pivot_y_linear_output, curve_contrast_around_pivot;
+  float curve_linear_ratio_below_pivot, curve_linear_ratio_above_pivot;
+  float curve_toe_power, curve_shoulder_power, curve_gamma;
+  int auto_gamma;
+  float curve_target_display_black_ratio, curve_target_display_white_ratio;
+  int base_primaries;  // 0 Rec2020, 1 Display P3, 2 Adobe RGB, 3 sRGB
+  int disable_primaries_adjustments;
+  float red_inset, red_rotation, green_inset, green_rotation, blue_inset, blue_rotation;
+  float master_outset_ratio, master_unrotation_ratio;
+  float red_outset, red_unrotation, green_outset, green_unrotation, blue_outset, blue_unrotation;
+  int completely_reverse_primaries;
+} agx_params;
+
+// tone_mapping_params_t
+typedef struct
+{
+  float black_relative_ev, white_relative_ev, range_in_ev, curve_gamma;
+  float pivot_x, pivot_y;
+  float target_black, toe_power, toe_transition_x, toe_transition_y, toe_scale;
+  int need_convex_toe;
+  float toe_fallback_coefficient, toe_fallback_power;
+  float slope, intercept;
+  float target_white, shoulder_power, shoulder_transition_x, shoulder_transition_y, shoulder_scale;
+  int need_concave_shoulder;
+  float shoulder_fallback_coefficient, shoulder_fallback_power;
+  float look_lift, look_slope, look_power, look_saturation, look_original_hue_mix_ratio;
+  int look_tuned, restore_hue;
+} agx_tone;
+
+// primaries_params_t; x, y, z = rojo, verde, azul
+typedef struct
+{
+  int base_primaries;
+  float3 inset, rotation;
+  float master_outset_ratio, master_unrotation_ratio;
+  float3 outset, unrotation;
+} agx_primaries;
+
+typedef struct
+{
+  agx_mat rendering_to_xyz, base_to_rendering, rendering_to_pipe;
+} agx_matrices;
+
+
+__DEVICE__ agx_mat agx_mat_make(float a00, float a01, float a02, float a10, float a11, float a12,
+                                float a20, float a21, float a22)
+{
+  agx_mat m;
+  m.r0 = make_float3(a00, a01, a02);
+  m.r1 = make_float3(a10, a11, a12);
+  m.r2 = make_float3(a20, a21, a22);
+  return m;
+}
+
+// dt_apply_transposed_color_matrix
+__DEVICE__ float3 agx_apply(float3 v, agx_mat m)
+{
+  return make_float3(m.r0.x * v.x + m.r1.x * v.y + m.r2.x * v.z,
+                     m.r0.y * v.x + m.r1.y * v.y + m.r2.y * v.z,
+                     m.r0.z * v.x + m.r1.z * v.y + m.r2.z * v.z);
+}
+
+__DEVICE__ float3 agx_mul_row(float3 a, agx_mat b)
+{
+  return make_float3(a.x * b.r0.x + a.y * b.r1.x + a.z * b.r2.x,
+                     a.x * b.r0.y + a.y * b.r1.y + a.z * b.r2.y,
+                     a.x * b.r0.z + a.y * b.r1.z + a.z * b.r2.z);
+}
+
+// dt_colormatrix_mul
+__DEVICE__ agx_mat agx_mat_mul(agx_mat a, agx_mat b)
+{
+  agx_mat m;
+  m.r0 = agx_mul_row(a.r0, b);
+  m.r1 = agx_mul_row(a.r1, b);
+  m.r2 = agx_mul_row(a.r2, b);
+  return m;
+}
+
+// mat3SSEinv; si es singular regresa ceros
+__DEVICE__ agx_mat agx_mat_inv(agx_mat s)
+{
+  const float a11 = s.r0.x, a12 = s.r0.y, a13 = s.r0.z;
+  const float a21 = s.r1.x, a22 = s.r1.y, a23 = s.r1.z;
+  const float a31 = s.r2.x, a32 = s.r2.y, a33 = s.r2.z;
+
+  const float det = a11 * (a33 * a22 - a32 * a23)
+                  - a21 * (a33 * a12 - a32 * a13)
+                  + a31 * (a23 * a12 - a22 * a13);
+
+  if(_fabs(det) < 1e-7f) return agx_mat_make(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+
+  const float inv_det = 1.0f / det;
+  return agx_mat_make(inv_det * (a33 * a22 - a32 * a23),
+                      -inv_det * (a33 * a12 - a32 * a13),
+                      inv_det * (a23 * a12 - a22 * a13),
+                      -inv_det * (a33 * a21 - a31 * a23),
+                      inv_det * (a33 * a11 - a31 * a13),
+                      -inv_det * (a23 * a11 - a21 * a13),
+                      inv_det * (a32 * a21 - a31 * a22),
+                      -inv_det * (a32 * a11 - a31 * a12),
+                      inv_det * (a22 * a11 - a21 * a12));
+}
+
+__DEVICE__ float agx_max3(float3 v)
+{
+  return _fmaxf(_fmaxf(v.x, v.y), v.z);
+}
+
+__DEVICE__ float agx_min3(float3 v)
+{
+  return _fminf(_fminf(v.x, v.y), v.z);
+}
+
+__DEVICE__ float agx_clampf(float a, float mn, float mx)
+{
+  return a >= mn ? (a <= mx ? a : mx) : mn;
+}
+
+__DEVICE__ float agx_clip(float x)
+{
+  return x >= 0.0f ? (x <= 1.0f ? x : 1.0f) : 0.0f;
+}
+
+
+// >>> generado por test/gen_consts.py: no editar a mano
+// Perfiles base como los arma darktable (lcms2, primarios adaptados a D50).
+// 0 Rec2020, 1 Display P3, 2 Adobe RGB, 3 sRGB
+__DEVICE__ agx_profile agx_base_profile(int base)
+{
+  agx_profile p;
+  if(base == 1)
+  {
+    p.rx = 0.681096792f; p.ry = 0.318903238f; p.gx = 0.284553885f; p.gy = 0.674631596f; p.bx = 0.155893788f; p.by = 0.0660517961f;
+    p.wx = 0.345702916f; p.wy = 0.358538598f;
+    p.xyz_to_base = agx_mat_make(2.40400696f, -0.842217982f, 0.0482060201f,
+                                 -0.989933133f, 1.7988348f, -0.097408995f,
+                                 -0.397636592f, 0.0160403624f, 1.27400744f);
+    p.pipe_to_base = agx_mat_make(1.34357512f, -0.0652957633f, 0.00282219425f,
+                                  -0.282185435f, 1.07578433f, -0.0196017697f,
+                                  -0.0613897443f, -0.0104887122f, 1.01677954f);
+    p.base_to_pipe = agx_mat_make(0.753834784f, 0.0457429253f, -0.00121051411f,
+                                  0.198602572f, 0.941780448f, 0.0176046696f,
+                                  0.0475627296f, 0.012476855f, 0.983605981f);
+  }
+  else if(base == 2)
+  {
+    p.rx = 0.648438871f; p.ry = 0.330856979f; p.gx = 0.230174854f; p.gy = 0.701562583f; p.bx = 0.155893803f; p.by = 0.0660518035f;
+    p.wx = 0.345702916f; p.wy = 0.358538598f;
+    p.xyz_to_base = agx_mat_make(1.96252811f, -0.97874099f, 0.0287117697f,
+                                 -0.610667288f, 1.91611922f, -0.140706137f,
+                                 -0.341377556f, 0.03343793f, 1.34928143f);
+    p.pipe_to_base = agx_mat_make(1.15197206f, -0.124547079f, -0.0225338303f,
+                                  -0.0975047722f, 1.13289523f, -0.0498152748f,
+                                  -0.0544673502f, -0.00834801048f, 1.07234907f);
+    p.base_to_pipe = agx_mat_make(0.877338707f, 0.0966208875f, 0.0229244363f,
+                                  0.0774958208f, 0.891530991f, 0.0430439524f,
+                                  0.0451655649f, 0.0118480027f, 0.934031606f);
+  }
+  else if(base == 3)
+  {
+    p.rx = 0.648438811f; p.ry = 0.330856949f; p.gx = 0.32117334f; p.gy = 0.597868383f; p.bx = 0.155893788f; p.by = 0.0660517961f;
+    p.wx = 0.345702916f; p.wy = 0.358538598f;
+    p.xyz_to_base = agx_mat_make(3.13423491f, -0.97874099f, 0.0719688162f,
+                                 -1.61725771f, 1.91611898f, -0.229020134f,
+                                 -0.4906919f, 0.0334379412f, 1.40577972f);
+    p.pipe_to_base = agx_mat_make(1.660496f, -0.124547139f, -0.0181536842f,
+                                  -0.587656498f, 1.13289499f, -0.100597374f,
+                                  -0.0728397965f, -0.00834801607f, 1.11875105f);
+    p.base_to_pipe = agx_mat_make(0.627402008f, 0.0690955296f, 0.0163937174f,
+                                  0.329292089f, 0.919544399f, 0.0880281776f,
+                                  0.0433061272f, 0.0113602355f, 0.895578146f);
+  }
+  else
+  {
+    p.rx = 0.707048714f; p.ry = 0.292951226f; p.gx = 0.190212011f; p.gy = 0.775366306f; p.bx = 0.129248619f; p.by = 0.047143653f;
+    p.wx = 0.345702916f; p.wy = 0.358538598f;
+    p.xyz_to_base = agx_mat_make(1.64725029f, -0.682616651f, 0.0296786744f,
+                                 -0.393625855f, 1.64760959f, -0.0629458427f,
+                                 -0.235971376f, 0.0128130484f, 1.25388491f);
+    p.pipe_to_base = agx_mat_make(1.0f, 1.82626536e-09f, 6.98491931e-10f,
+                                  1.11758709e-08f, 1.0f, 0.0f,
+                                  1.49011612e-08f, 4.65661287e-09f, 1.0f);
+    p.base_to_pipe = agx_mat_make(1.0f, -1.82626536e-09f, -6.98491931e-10f,
+                                  -1.11758709e-08f, 1.0f, 7.80625564e-18f,
+                                  -1.49011612e-08f, -4.65661287e-09f, 1.0f);
+  }
+  return p;
+}
+
+// DaVinci Wide Gamut -> Rec2020, ambos con blanco D65 (0.3127, 0.3290)
+__DEVICE__ agx_mat agx_dwg_to_rec2020()
+{
+  return agx_mat_make(1.13030218f, -0.0255470571f, -0.0925986068f,
+                      -0.0203928523f, 1.31084932f, -0.164653022f,
+                      -0.109909329f, -0.28530226f, 1.25725163f);
+}
+
+// Presets de darktable (init_presets en agx.c). 1 scene-referred default, 2 blender-like base,
+// 3 blender-like punchy, 4 sigmoid-like default, 5 sigmoid-like smooth, 6 smooth,
+// 7 unmodified base primaries
+__DEVICE__ agx_params agx_preset(int preset, agx_params p)
+{
+  if(preset == 1)
+  {
+    p.look_lift = 0.0f;
+    p.look_slope = 1.0f;
+    p.look_brightness = 1.0f;
+    p.look_saturation = 1.0f;
+    p.look_original_hue_mix_ratio = 0.600000024f;
+    p.range_black_relative_ev = -10.0f;
+    p.range_white_relative_ev = 6.5f;
+    p.curve_pivot_x = 0.606060624f;
+    p.curve_pivot_y_linear_output = 0.180000007f;
+    p.curve_contrast_around_pivot = 3.0f;
+    p.curve_linear_ratio_below_pivot = 0.0f;
+    p.curve_linear_ratio_above_pivot = 0.0f;
+    p.curve_toe_power = 1.5f;
+    p.curve_shoulder_power = 3.29999995f;
+    p.curve_gamma = 2.20000005f;
+    p.auto_gamma = 0;
+    p.curve_target_display_black_ratio = 0.0f;
+    p.curve_target_display_white_ratio = 1.0f;
+    p.base_primaries = 0;
+    p.disable_primaries_adjustments = 0;
+    p.red_inset = 0.294624507f;
+    p.red_rotation = 0.0354032889f;
+    p.green_inset = 0.258619249f;
+    p.green_rotation = -0.0210858602f;
+    p.blue_inset = 0.146413714f;
+    p.blue_rotation = -0.0630572364f;
+    p.master_outset_ratio = 1.0f;
+    p.master_unrotation_ratio = 0.0f;
+    p.red_outset = 0.290776402f;
+    p.red_unrotation = 0.0354032889f;
+    p.green_outset = 0.263155401f;
+    p.green_unrotation = -0.0210858602f;
+    p.blue_outset = 0.0458107218f;
+    p.blue_unrotation = -0.0630572364f;
+    p.completely_reverse_primaries = 0;
+  }
+  else if(preset == 2)
+  {
+    p.look_lift = 0.0f;
+    p.look_slope = 1.0f;
+    p.look_brightness = 1.0f;
+    p.look_saturation = 1.0f;
+    p.look_original_hue_mix_ratio = 0.600000024f;
+    p.range_black_relative_ev = -10.0f;
+    p.range_white_relative_ev = 6.5f;
+    p.curve_pivot_x = 0.606060624f;
+    p.curve_pivot_y_linear_output = 0.180000007f;
+    p.curve_contrast_around_pivot = 2.45352459f;
+    p.curve_linear_ratio_below_pivot = 0.0f;
+    p.curve_linear_ratio_above_pivot = 0.0f;
+    p.curve_toe_power = 1.5f;
+    p.curve_shoulder_power = 1.5f;
+    p.curve_gamma = 2.4000001f;
+    p.auto_gamma = 0;
+    p.curve_target_display_black_ratio = 0.0f;
+    p.curve_target_display_white_ratio = 1.0f;
+    p.base_primaries = 0;
+    p.disable_primaries_adjustments = 0;
+    p.red_inset = 0.294624507f;
+    p.red_rotation = 0.0354032889f;
+    p.green_inset = 0.258619249f;
+    p.green_rotation = -0.0210858602f;
+    p.blue_inset = 0.146413714f;
+    p.blue_rotation = -0.0630572364f;
+    p.master_outset_ratio = 1.0f;
+    p.master_unrotation_ratio = 0.0f;
+    p.red_outset = 0.290776402f;
+    p.red_unrotation = 0.0354032889f;
+    p.green_outset = 0.263155401f;
+    p.green_unrotation = -0.0210858602f;
+    p.blue_outset = 0.0458107218f;
+    p.blue_unrotation = -0.0630572364f;
+    p.completely_reverse_primaries = 0;
+  }
+  else if(preset == 3)
+  {
+    p.look_lift = 0.0f;
+    p.look_slope = 1.0f;
+    p.look_brightness = 0.548696816f;
+    p.look_saturation = 1.39999998f;
+    p.look_original_hue_mix_ratio = 0.600000024f;
+    p.range_black_relative_ev = -10.0f;
+    p.range_white_relative_ev = 6.5f;
+    p.curve_pivot_x = 0.606060624f;
+    p.curve_pivot_y_linear_output = 0.180000007f;
+    p.curve_contrast_around_pivot = 2.45352459f;
+    p.curve_linear_ratio_below_pivot = 0.0f;
+    p.curve_linear_ratio_above_pivot = 0.0f;
+    p.curve_toe_power = 1.5f;
+    p.curve_shoulder_power = 1.5f;
+    p.curve_gamma = 2.4000001f;
+    p.auto_gamma = 0;
+    p.curve_target_display_black_ratio = 0.0f;
+    p.curve_target_display_white_ratio = 1.0f;
+    p.base_primaries = 0;
+    p.disable_primaries_adjustments = 0;
+    p.red_inset = 0.294624507f;
+    p.red_rotation = 0.0354032889f;
+    p.green_inset = 0.258619249f;
+    p.green_rotation = -0.0210858602f;
+    p.blue_inset = 0.146413714f;
+    p.blue_rotation = -0.0630572364f;
+    p.master_outset_ratio = 1.0f;
+    p.master_unrotation_ratio = 0.0f;
+    p.red_outset = 0.290776402f;
+    p.red_unrotation = 0.0354032889f;
+    p.green_outset = 0.263155401f;
+    p.green_unrotation = -0.0210858602f;
+    p.blue_outset = 0.0458107218f;
+    p.blue_unrotation = -0.0630572364f;
+    p.completely_reverse_primaries = 0;
+  }
+  else if(preset == 4)
+  {
+    p.look_lift = 0.0f;
+    p.look_slope = 1.0f;
+    p.look_brightness = 1.0f;
+    p.look_saturation = 1.0f;
+    p.look_original_hue_mix_ratio = 1.0f;
+    p.range_black_relative_ev = -10.0f;
+    p.range_white_relative_ev = 6.5f;
+    p.curve_pivot_x = 0.606060624f;
+    p.curve_pivot_y_linear_output = 0.180000007f;
+    p.curve_contrast_around_pivot = 3.06999993f;
+    p.curve_linear_ratio_below_pivot = 0.0f;
+    p.curve_linear_ratio_above_pivot = 0.0f;
+    p.curve_toe_power = 1.39999998f;
+    p.curve_shoulder_power = 3.71000004f;
+    p.curve_gamma = 2.20000005f;
+    p.auto_gamma = 0;
+    p.curve_target_display_black_ratio = 0.0f;
+    p.curve_target_display_white_ratio = 1.0f;
+    p.base_primaries = 0;
+    p.disable_primaries_adjustments = 0;
+    p.red_inset = 0.294624507f;
+    p.red_rotation = 0.0354032889f;
+    p.green_inset = 0.258619249f;
+    p.green_rotation = -0.0210858602f;
+    p.blue_inset = 0.146413714f;
+    p.blue_rotation = -0.0630572364f;
+    p.master_outset_ratio = 1.0f;
+    p.master_unrotation_ratio = 0.0f;
+    p.red_outset = 0.290776402f;
+    p.red_unrotation = 0.0354032889f;
+    p.green_outset = 0.263155401f;
+    p.green_unrotation = -0.0210858602f;
+    p.blue_outset = 0.0458107218f;
+    p.blue_unrotation = -0.0630572364f;
+    p.completely_reverse_primaries = 0;
+  }
+  else if(preset == 5)
+  {
+    p.look_lift = 0.0f;
+    p.look_slope = 1.0f;
+    p.look_brightness = 1.0f;
+    p.look_saturation = 1.0f;
+    p.look_original_hue_mix_ratio = 0.0f;
+    p.range_black_relative_ev = -10.0f;
+    p.range_white_relative_ev = 6.5f;
+    p.curve_pivot_x = 0.606060624f;
+    p.curve_pivot_y_linear_output = 0.180000007f;
+    p.curve_contrast_around_pivot = 2.98000002f;
+    p.curve_linear_ratio_below_pivot = 0.0f;
+    p.curve_linear_ratio_above_pivot = 0.0f;
+    p.curve_toe_power = 1.61000001f;
+    p.curve_shoulder_power = 3.01999998f;
+    p.curve_gamma = 2.20000005f;
+    p.auto_gamma = 0;
+    p.curve_target_display_black_ratio = 0.0f;
+    p.curve_target_display_white_ratio = 1.0f;
+    p.base_primaries = 0;
+    p.disable_primaries_adjustments = 0;
+    p.red_inset = 0.100000001f;
+    p.red_rotation = 0.0349065848f;
+    p.green_inset = 0.100000001f;
+    p.green_rotation = -0.0174532924f;
+    p.blue_inset = 0.150000006f;
+    p.blue_rotation = -0.052359879f;
+    p.master_outset_ratio = 0.0f;
+    p.master_unrotation_ratio = 1.0f;
+    p.red_outset = 0.100000001f;
+    p.red_unrotation = 0.0349065848f;
+    p.green_outset = 0.100000001f;
+    p.green_unrotation = -0.0174532924f;
+    p.blue_outset = 0.150000006f;
+    p.blue_unrotation = -0.052359879f;
+    p.completely_reverse_primaries = 0;
+  }
+  else if(preset == 6)
+  {
+    p.look_lift = 0.0f;
+    p.look_slope = 1.0f;
+    p.look_brightness = 1.0f;
+    p.look_saturation = 1.0f;
+    p.look_original_hue_mix_ratio = 0.600000024f;
+    p.range_black_relative_ev = -10.0f;
+    p.range_white_relative_ev = 6.5f;
+    p.curve_pivot_x = 0.606060624f;
+    p.curve_pivot_y_linear_output = 0.180000007f;
+    p.curve_contrast_around_pivot = 3.0f;
+    p.curve_linear_ratio_below_pivot = 0.0f;
+    p.curve_linear_ratio_above_pivot = 0.0f;
+    p.curve_toe_power = 1.5f;
+    p.curve_shoulder_power = 3.29999995f;
+    p.curve_gamma = 2.20000005f;
+    p.auto_gamma = 0;
+    p.curve_target_display_black_ratio = 0.0f;
+    p.curve_target_display_white_ratio = 1.0f;
+    p.base_primaries = 0;
+    p.disable_primaries_adjustments = 0;
+    p.red_inset = 0.100000001f;
+    p.red_rotation = 0.0349065848f;
+    p.green_inset = 0.100000001f;
+    p.green_rotation = -0.0174532924f;
+    p.blue_inset = 0.150000006f;
+    p.blue_rotation = -0.052359879f;
+    p.master_outset_ratio = 0.0f;
+    p.master_unrotation_ratio = 1.0f;
+    p.red_outset = 0.100000001f;
+    p.red_unrotation = 0.0349065848f;
+    p.green_outset = 0.100000001f;
+    p.green_unrotation = -0.0174532924f;
+    p.blue_outset = 0.150000006f;
+    p.blue_unrotation = -0.052359879f;
+    p.completely_reverse_primaries = 0;
+  }
+  else if(preset == 7)
+  {
+    p.look_lift = 0.0f;
+    p.look_slope = 1.0f;
+    p.look_brightness = 1.0f;
+    p.look_saturation = 1.0f;
+    p.look_original_hue_mix_ratio = 0.600000024f;
+    p.range_black_relative_ev = -10.0f;
+    p.range_white_relative_ev = 6.5f;
+    p.curve_pivot_x = 0.606060624f;
+    p.curve_pivot_y_linear_output = 0.180000007f;
+    p.curve_contrast_around_pivot = 3.0f;
+    p.curve_linear_ratio_below_pivot = 0.0f;
+    p.curve_linear_ratio_above_pivot = 0.0f;
+    p.curve_toe_power = 1.5f;
+    p.curve_shoulder_power = 3.29999995f;
+    p.curve_gamma = 2.20000005f;
+    p.auto_gamma = 0;
+    p.curve_target_display_black_ratio = 0.0f;
+    p.curve_target_display_white_ratio = 1.0f;
+    p.base_primaries = 0;
+    p.disable_primaries_adjustments = 0;
+    p.red_inset = 0.0f;
+    p.red_rotation = 0.0f;
+    p.green_inset = 0.0f;
+    p.green_rotation = 0.0f;
+    p.blue_inset = 0.0f;
+    p.blue_rotation = 0.0f;
+    p.master_outset_ratio = 1.0f;
+    p.master_unrotation_ratio = 1.0f;
+    p.red_outset = 0.0f;
+    p.red_unrotation = 0.0f;
+    p.green_outset = 0.0f;
+    p.green_unrotation = 0.0f;
+    p.blue_outset = 0.0f;
+    p.blue_unrotation = 0.0f;
+    p.completely_reverse_primaries = 0;
+  }
+  return p;
+}
+// <<< generado
+
+
+// ---- primarios (custom_primaries.c y colorspaces.c) ----
+
+__DEVICE__ float agx_determinant(float a, float b, float c, float d)
+{
+  return a * d - b * c;
+}
+
+__DEVICE__ float agx_intersect_line_segments(float x1, float y1, float x2, float y2,
+                                             float x3, float y3, float x4, float y4)
+{
+  const float denominator = agx_determinant(x1 - x2, x3 - x4, y1 - y2, y3 - y4);
+  if(denominator == 0.0f) return AGX_FLT_MAX;
+
+  const float t = agx_determinant(x1 - x3, x3 - x4, y1 - y3, y3 - y4) / denominator;
+  if(t >= 0.0f) return t;
+  return AGX_FLT_MAX;
+}
+
+__DEVICE__ float2 agx_primary_xy(agx_profile p, int i)
+{
+  return i == 0 ? make_float2(p.rx, p.ry) : (i == 1 ? make_float2(p.gx, p.gy) : make_float2(p.bx, p.by));
+}
+
+__DEVICE__ float agx_find_distance_to_edge(agx_profile p, float cos_angle, float sin_angle)
+{
+  const float x1 = p.wx;
+  const float y1 = p.wy;
+  const float x2 = x1 + cos_angle;
+  const float y2 = y1 + sin_angle;
+
+  float distance_to_edge = AGX_FLT_MAX;
+  for(int i = 0; i < 3; i++)
+  {
+    const float2 a = agx_primary_xy(p, i);
+    const float2 b = agx_primary_xy(p, i == 2 ? 0 : i + 1);
+    const float dist = agx_intersect_line_segments(x1, y1, x2, y2, a.x, a.y, b.x, b.y);
+    if(dist < distance_to_edge) distance_to_edge = dist;
+  }
+  return distance_to_edge;
+}
+
+// dt_rotate_and_scale_primary
+__DEVICE__ float2 agx_rotate_and_scale_primary(agx_profile p, float scaling, float rotation, int i)
+{
+  const float2 primary = agx_primary_xy(p, i);
+  const float dx = primary.x - p.wx;
+  const float dy = primary.y - p.wy;
+  const float angle = _atan2f(dy, dx) + rotation;
+  const float cos_angle = _cosf(angle);
+  const float sin_angle = _sinf(angle);
+  const float distance_to_edge = agx_find_distance_to_edge(p, cos_angle, sin_angle);
+  const float dx_new = scaling * distance_to_edge * cos_angle;
+  const float dy_new = scaling * distance_to_edge * sin_angle;
+  return make_float2(dx_new + p.wx, dy_new + p.wy);
+}
+
+__DEVICE__ float agx_sanitize_y(float y)
+{
+  if(y < AGX_FLT_EPSILON && y >= 0.0f) return AGX_FLT_EPSILON;
+  if(y < 0.0f && y > -AGX_FLT_EPSILON) return -AGX_FLT_EPSILON;
+  return y;
+}
+
+__DEVICE__ float3 agx_primary_row(float2 primary)
+{
+  const float y = agx_sanitize_y(primary.y);
+  return make_float3(primary.x / y, 1.0f, (1.0f - primary.x - y) / y);
+}
+
+// dt_make_transposed_matrices_from_primaries_and_whitepoint
+__DEVICE__ agx_mat agx_rgb_to_xyz_from_primaries(float2 r, float2 g, float2 b, float wx, float wy)
+{
+  agx_mat primaries_matrix;
+  primaries_matrix.r0 = agx_primary_row(r);
+  primaries_matrix.r1 = agx_primary_row(g);
+  primaries_matrix.r2 = agx_primary_row(b);
+
+  const agx_mat primaries_inverse = agx_mat_inv(primaries_matrix);
+  const float y = agx_sanitize_y(wy);
+  const float3 xyz_white = make_float3(wx / y, 1.0f, (1.0f - wx - y) / y);
+  const float3 scale = agx_apply(xyz_white, primaries_inverse);
+
+  agx_mat m;
+  m.r0 = make_float3(scale.x * primaries_matrix.r0.x, scale.x * primaries_matrix.r0.y, scale.x * primaries_matrix.r0.z);
+  m.r1 = make_float3(scale.y * primaries_matrix.r1.x, scale.y * primaries_matrix.r1.y, scale.y * primaries_matrix.r1.z);
+  m.r2 = make_float3(scale.z * primaries_matrix.r2.x, scale.z * primaries_matrix.r2.y, scale.z * primaries_matrix.r2.z);
+  return m;
+}
+
+
+// ---- AgX (agx.c) ----
+
+__DEVICE__ float agx_line(float x, float slope, float intercept)
+{
+  return slope * x + intercept;
+}
+
+__DEVICE__ float agx_scale(float limit_x, float limit_y, float transition_x, float transition_y,
+                           float slope, float power)
+{
+  const float projected_rise = slope * _fmaxf(AGX_EPSILON, limit_x - transition_x);
+  const float actual_rise = _fmaxf(AGX_EPSILON, limit_y - transition_y);
+  const float transformed_projected_rise = _powf(projected_rise, -power);
+  const float transformed_actual_rise = _powf(actual_rise, -power);
+  const float base = _fmaxf(AGX_EPSILON, transformed_actual_rise - transformed_projected_rise);
+  const float scale_value = _powf(base, -1.0f / power);
+  return _fminf(1e9f, scale_value);
+}
+
+__DEVICE__ float agx_sigmoid(float x, float power)
+{
+  return x / _powf(1.0f + _powf(x, power), 1.0f / power);
+}
+
+__DEVICE__ float agx_scaled_sigmoid(float x, float scale, float slope, float power,
+                                    float transition_x, float transition_y)
+{
+  return scale * agx_sigmoid(slope * (x - transition_x) / scale, power) + transition_y;
+}
+
+__DEVICE__ float agx_fallback_toe(float x, agx_tone t)
+{
+  return x < 0.0f
+           ? t.target_black
+           : t.target_black + _fmaxf(0.0f, t.toe_fallback_coefficient * _powf(x, t.toe_fallback_power));
+}
+
+__DEVICE__ float agx_fallback_shoulder(float x, agx_tone t)
+{
+  return x >= 1.0f
+           ? t.target_white
+           : t.target_white - _fmaxf(0.0f, t.shoulder_fallback_coefficient * _powf(1.0f - x, t.shoulder_fallback_power));
+}
+
+__DEVICE__ float agx_apply_curve(float x, agx_tone t)
+{
+  float result;
+  if(x < t.toe_transition_x)
+  {
+    result = t.need_convex_toe
+               ? agx_fallback_toe(x, t)
+               : agx_scaled_sigmoid(x, t.toe_scale, t.slope, t.toe_power, t.toe_transition_x, t.toe_transition_y);
+  }
+  else if(x <= t.shoulder_transition_x)
+  {
+    result = agx_line(x, t.slope, t.intercept);
+  }
+  else
+  {
+    result = t.need_concave_shoulder
+               ? agx_fallback_shoulder(x, t)
+               : agx_scaled_sigmoid(x, t.shoulder_scale, t.slope, t.shoulder_power, t.shoulder_transition_x,
+                                    t.shoulder_transition_y);
+  }
+  return agx_clampf(result, t.target_black, t.target_white);
+}
+
+// remainderf(x, 1.0f): resta el entero mas cercano, empates al par
+__DEVICE__ float agx_remainder_one(float x)
+{
+  float n = _floorf(x + 0.5f);
+  if(n - x == 0.5f && n - 2.0f * _floorf(0.5f * n) != 0.0f) n -= 1.0f;
+  return x - n;
+}
+
+__DEVICE__ float agx_lerp_hue(float original_hue, float processed_hue, float mix_ratio)
+{
+  const float shortest_distance_on_hue_circle = agx_remainder_one(processed_hue - original_hue);
+  const float mixed_hue = (1.0f - mix_ratio) * shortest_distance_on_hue_circle + original_hue;
+  return mixed_hue - _floorf(mixed_hue);
+}
+
+__DEVICE__ float agx_apply_slope_lift(float x, float slope, float lift)
+{
+  const float m = slope / (1.0f + lift);
+  const float b = lift * m;
+  return m * x + b;
+}
+
+__DEVICE__ float agx_slope_lift_power(float x, float slope, float lift, float power)
+{
+  const float v = agx_apply_slope_lift(x, slope, lift);
+  return v > 0.0f ? _powf(v, power) : v;
+}
+
+__DEVICE__ float3 agx_look(float3 px, agx_tone t, agx_mat rendering_to_xyz)
+{
+  px = make_float3(agx_slope_lift_power(px.x, t.look_slope, t.look_lift, t.look_power),
+                   agx_slope_lift_power(px.y, t.look_slope, t.look_lift, t.look_power),
+                   agx_slope_lift_power(px.z, t.look_slope, t.look_lift, t.look_power));
+
+  const float luma = agx_apply(px, rendering_to_xyz).y;
+  const float sat = t.look_saturation;
+  return make_float3(luma + sat * (px.x - luma), luma + sat * (px.y - luma), luma + sat * (px.z - luma));
+}
+
+__DEVICE__ float agx_apply_log_encoding(float x, float range_in_ev, float black_relative_ev)
+{
+  const float x_relative = _fmaxf(AGX_EPSILON, x / 0.18f);
+  const float mapped = (_log2f(_fmaxf(x_relative, 0.0f)) - black_relative_ev) / range_in_ev;
+  return agx_clip(mapped);
+}
+
+__DEVICE__ float agx_calculate_slope_matching_power(float slope, float dx_transition_to_limit,
+                                                    float dy_transition_to_limit)
+{
+  return slope * dx_transition_to_limit / dy_transition_to_limit;
+}
+
+__DEVICE__ float agx_calculate_fallback_curve_coefficient(float dx_transition_to_limit,
+                                                          float dy_transition_to_limit, float exponent)
+{
+  return dy_transition_to_limit / _powf(dx_transition_to_limit, exponent);
+}
+
+__DEVICE__ float agx_luminance_bt2020(float3 v)
+{
+  return v.x * 0.2658180370250449f + v.y * 0.59846986045365f + v.z * 0.1357121025213052f;
+}
+
+// _compress_into_gamut (compensacion de luminancia de Eary Chow)
+__DEVICE__ float3 agx_compress_into_gamut(float3 px)
+{
+  const float input_y = agx_luminance_bt2020(px);
+  const float max_rgb = agx_max3(px);
+
+  const float3 opponent_rgb = make_float3(max_rgb - px.x, max_rgb - px.y, max_rgb - px.z);
+  const float opponent_y = agx_luminance_bt2020(opponent_rgb);
+  const float max_opponent = agx_max3(opponent_rgb);
+  const float y_compensate_negative = max_opponent - opponent_y + input_y;
+
+  const float min_rgb = agx_min3(px);
+  const float offset = _fmaxf(-min_rgb, 0.0f);
+  const float3 rgb_offset = make_float3(px.x + offset, px.y + offset, px.z + offset);
+
+  const float max_of_rgb_offset = agx_max3(rgb_offset);
+  const float3 opponent_rgb_offset = make_float3(max_of_rgb_offset - rgb_offset.x,
+                                                 max_of_rgb_offset - rgb_offset.y,
+                                                 max_of_rgb_offset - rgb_offset.z);
+  const float max_inverse_rgb_offset = agx_max3(opponent_rgb_offset);
+  const float y_inverse_rgb_offset = agx_luminance_bt2020(opponent_rgb_offset);
+  float y_new = agx_luminance_bt2020(rgb_offset);
+  y_new = max_inverse_rgb_offset - y_inverse_rgb_offset + y_new;
+
+  const float luminance_ratio = (y_new > y_compensate_negative && y_new > AGX_EPSILON)
+                                  ? y_compensate_negative / y_new
+                                  : 1.0f;
+  return make_float3(luminance_ratio * rgb_offset.x, luminance_ratio * rgb_offset.y,
+                     luminance_ratio * rgb_offset.z);
+}
+
+__DEVICE__ float agx_calculate_pivot_y_at_gamma(agx_params p, float gamma)
+{
+  return _powf(agx_clampf(p.curve_pivot_y_linear_output, p.curve_target_display_black_ratio,
+                          p.curve_target_display_white_ratio),
+               1.0f / gamma);
+}
+
+__DEVICE__ float agx_calculate_slope_gamma_compensation(float gamma, float pivot_y, agx_params p)
+{
+  const float pivot_y_at_default_gamma = agx_calculate_pivot_y_at_gamma(p, AGX_DEFAULT_GAMMA);
+  const float derivative_at_current_gamma = gamma * _powf(_fmaxf(AGX_EPSILON, pivot_y), gamma - 1.0f);
+  const float derivative_at_default_gamma =
+      AGX_DEFAULT_GAMMA * _powf(_fmaxf(AGX_EPSILON, pivot_y_at_default_gamma), AGX_DEFAULT_GAMMA - 1.0f);
+  return derivative_at_current_gamma / derivative_at_default_gamma;
+}
+
+// _calculate_tone_mapping_params, con _set_log_mapping_params y _adjust_pivot
+__DEVICE__ agx_tone agx_calculate_tone_mapping_params(agx_params p)
+{
+  agx_tone t;
+
+  // look
+  t.look_lift = p.look_lift;
+  t.look_slope = p.look_slope;
+  t.look_saturation = p.look_saturation;
+  const float brightness = p.look_brightness;
+  t.look_power = brightness < 1.0f ? 1.0f / _sqrtf(_fmaxf(brightness, AGX_EPSILON)) : 1.0f / brightness;
+  t.look_original_hue_mix_ratio = p.look_original_hue_mix_ratio;
+  t.look_tuned = p.look_slope != 1.0f || p.look_brightness != 1.0f || p.look_lift != 0.0f
+                 || p.look_saturation != 1.0f;
+  t.restore_hue = p.look_original_hue_mix_ratio != 0.0f;
+
+  // log mapping
+  t.white_relative_ev = p.range_white_relative_ev;
+  t.black_relative_ev = p.range_black_relative_ev;
+  t.range_in_ev = t.white_relative_ev - t.black_relative_ev;
+
+  // pivot
+  t.pivot_x = agx_clampf(p.curve_pivot_x, AGX_EPSILON, 1.0f - AGX_EPSILON);
+  if(p.auto_gamma)
+  {
+    t.curve_gamma = t.pivot_x > 0.0f && p.curve_pivot_y_linear_output > 0.0f
+                      ? _log2f(p.curve_pivot_y_linear_output) / _log2f(t.pivot_x)
+                      : p.curve_gamma;
+  }
+  else
+  {
+    t.curve_gamma = p.curve_gamma;
+  }
+  t.pivot_y = agx_calculate_pivot_y_at_gamma(p, t.curve_gamma);
+
+  const float range_adjusted_slope = p.curve_contrast_around_pivot * (t.range_in_ev / 16.5f);
+  const float compensation_factor = agx_calculate_slope_gamma_compensation(t.curve_gamma, t.pivot_y, p);
+  t.slope = range_adjusted_slope / compensation_factor;
+
+  // toe
+  t.target_black = _powf(p.curve_target_display_black_ratio, 1.0f / t.curve_gamma);
+  t.toe_power = _fmaxf(0.01f, p.curve_toe_power);
+
+  const float remaining_y_below_pivot = t.pivot_y - t.target_black;
+  const float toe_length_y = remaining_y_below_pivot * p.curve_linear_ratio_below_pivot;
+  float dx_linear_below_pivot = toe_length_y / t.slope;
+  t.toe_transition_x = _fmaxf(AGX_EPSILON, t.pivot_x - dx_linear_below_pivot);
+  dx_linear_below_pivot = t.pivot_x - t.toe_transition_x;
+
+  const float toe_dy_below_pivot = t.slope * dx_linear_below_pivot;
+  t.toe_transition_y = t.pivot_y - toe_dy_below_pivot;
+
+  const float inverse_toe_limit_x = 1.0f;
+  const float inverse_toe_limit_y = 1.0f - t.target_black;
+  const float inverse_toe_transition_x = 1.0f - t.toe_transition_x;
+  const float inverse_toe_transition_y = 1.0f - t.toe_transition_y;
+
+  t.toe_scale = -agx_scale(inverse_toe_limit_x, inverse_toe_limit_y, inverse_toe_transition_x,
+                           inverse_toe_transition_y, t.slope, t.toe_power);
+
+  const float toe_length_x = t.toe_transition_x;
+  const float toe_dy_transition_to_limit = _fmaxf(AGX_EPSILON, t.toe_transition_y - t.target_black);
+  const float toe_slope_transition_to_limit = toe_dy_transition_to_limit / toe_length_x;
+  t.need_convex_toe = toe_slope_transition_to_limit > t.slope;
+
+  t.toe_fallback_power = agx_calculate_slope_matching_power(t.slope, toe_length_x, toe_dy_transition_to_limit);
+  t.toe_fallback_coefficient =
+      agx_calculate_fallback_curve_coefficient(toe_length_x, toe_dy_transition_to_limit, t.toe_fallback_power);
+
+  t.intercept = t.toe_transition_y - (t.slope * t.toe_transition_x);
+
+  // shoulder
+  t.target_white = _powf(p.curve_target_display_white_ratio, 1.0f / t.curve_gamma);
+  const float remaining_y_above_pivot = t.target_white - t.pivot_y;
+  const float shoulder_length_y = remaining_y_above_pivot * p.curve_linear_ratio_above_pivot;
+  float dx_linear_above_pivot = shoulder_length_y / t.slope;
+
+  t.shoulder_transition_x = _fminf(1.0f - AGX_EPSILON, t.pivot_x + dx_linear_above_pivot);
+  dx_linear_above_pivot = t.shoulder_transition_x - t.pivot_x;
+
+  const float shoulder_dy_above_pivot = t.slope * dx_linear_above_pivot;
+  t.shoulder_transition_y = t.pivot_y + shoulder_dy_above_pivot;
+  t.shoulder_power = _fmaxf(0.01f, p.curve_shoulder_power);
+
+  const float shoulder_limit_x = 1.0f;
+  t.shoulder_scale = agx_scale(shoulder_limit_x, t.target_white, t.shoulder_transition_x,
+                               t.shoulder_transition_y, t.slope, t.shoulder_power);
+
+  const float shoulder_length_x = 1.0f - t.shoulder_transition_x;
+  const float shoulder_dy_transition_to_limit = _fmaxf(AGX_EPSILON, t.target_white - t.shoulder_transition_y);
+  const float shoulder_slope_transition_to_limit = shoulder_dy_transition_to_limit / shoulder_length_x;
+  t.need_concave_shoulder = shoulder_slope_transition_to_limit > t.slope;
+
+  t.shoulder_fallback_power =
+      agx_calculate_slope_matching_power(t.slope, shoulder_length_x, shoulder_dy_transition_to_limit);
+  t.shoulder_fallback_coefficient = agx_calculate_fallback_curve_coefficient(
+      shoulder_length_x, shoulder_dy_transition_to_limit, t.shoulder_fallback_power);
+
+  return t;
+}
+
+// _get_primaries_params
+__DEVICE__ agx_primaries agx_get_primaries_params(agx_params p)
+{
+  agx_primaries pp;
+  pp.base_primaries = p.base_primaries;
+  pp.inset = make_float3(p.red_inset, p.green_inset, p.blue_inset);
+  pp.rotation = make_float3(p.red_rotation, p.green_rotation, p.blue_rotation);
+  pp.master_outset_ratio = p.master_outset_ratio;
+  pp.master_unrotation_ratio = p.master_unrotation_ratio;
+
+  if(p.disable_primaries_adjustments)
+  {
+    pp.inset = make_float3(0.0f, 0.0f, 0.0f);
+    pp.rotation = pp.inset;
+    pp.outset = pp.inset;
+    pp.unrotation = pp.inset;
+  }
+  else if(p.completely_reverse_primaries)
+  {
+    pp.outset = pp.inset;
+    pp.unrotation = pp.rotation;
+    pp.master_outset_ratio = 1.0f;
+    pp.master_unrotation_ratio = 1.0f;
+  }
+  else
+  {
+    pp.outset = make_float3(p.red_outset, p.green_outset, p.blue_outset);
+    pp.unrotation = make_float3(p.red_unrotation, p.green_unrotation, p.blue_unrotation);
+  }
+  return pp;
+}
+
+// _create_matrices
+__DEVICE__ agx_matrices agx_create_matrices(agx_primaries pp, agx_profile base)
+{
+  agx_matrices m;
+
+  // entrada: base -> espacio de render (inset y rotacion)
+  const float2 ir = agx_rotate_and_scale_primary(base, 1.0f - pp.inset.x, pp.rotation.x, 0);
+  const float2 ig = agx_rotate_and_scale_primary(base, 1.0f - pp.inset.y, pp.rotation.y, 1);
+  const float2 ib = agx_rotate_and_scale_primary(base, 1.0f - pp.inset.z, pp.rotation.z, 2);
+  m.rendering_to_xyz = agx_rgb_to_xyz_from_primaries(ir, ig, ib, base.wx, base.wy);
+  m.base_to_rendering = agx_mat_mul(m.rendering_to_xyz, base.xyz_to_base);
+
+  // salida: outset y unrotation, invertida
+  const float2 orr = agx_rotate_and_scale_primary(base, 1.0f - pp.master_outset_ratio * pp.outset.x,
+                                                  pp.master_unrotation_ratio * pp.unrotation.x, 0);
+  const float2 og = agx_rotate_and_scale_primary(base, 1.0f - pp.master_outset_ratio * pp.outset.y,
+                                                 pp.master_unrotation_ratio * pp.unrotation.y, 1);
+  const float2 ob = agx_rotate_and_scale_primary(base, 1.0f - pp.master_outset_ratio * pp.outset.z,
+                                                 pp.master_unrotation_ratio * pp.unrotation.z, 2);
+  const agx_mat outset_to_xyz = agx_rgb_to_xyz_from_primaries(orr, og, ob, base.wx, base.wy);
+  const agx_mat rendering_to_base = agx_mat_inv(agx_mat_mul(outset_to_xyz, base.xyz_to_base));
+  m.rendering_to_pipe = agx_mat_mul(rendering_to_base, base.base_to_pipe);
+  return m;
+}
+
+// dt_RGB_2_HSV y dt_HSV_2_RGB
+__DEVICE__ float3 agx_rgb_to_hsv(float3 rgb)
+{
+  const float mn = agx_min3(rgb);
+  const float mx = agx_max3(rgb);
+  const float delta = mx - mn;
+  float h = 0.0f;
+  float s = 0.0f;
+  if(_fabs(mx) > 1e-6f && _fabs(delta) > 1e-6f)
+  {
+    s = delta / mx;
+    if(rgb.x == mx)
+      h = (rgb.y - rgb.z) / delta;
+    else if(rgb.y == mx)
+      h = 2.0f + (rgb.z - rgb.x) / delta;
+    else
+      h = 4.0f + (rgb.x - rgb.y) / delta;
+    h /= 6.0f;
+    h = h - _floorf(h);
+  }
+  return make_float3(h, s, mx);
+}
+
+__DEVICE__ float3 agx_hsv_to_rgb(float3 hsv)
+{
+  const float c = hsv.y * hsv.z;
+  const float mn = hsv.z - c;
+  const float h = hsv.x * 6.0f;
+  const float i = _floorf(h);
+  const float f = h - i;
+  const float fc = f * c;
+  const float top = c + mn;
+  const float inc = fc + mn;
+  const float dec = top - fc;
+  const int i_idx = (int)i;
+  if(i_idx == 0) return make_float3(top, inc, mn);
+  if(i_idx == 1) return make_float3(dec, top, mn);
+  if(i_idx == 2) return make_float3(mn, top, inc);
+  if(i_idx == 3) return make_float3(mn, dec, top);
+  if(i_idx == 4) return make_float3(inc, mn, top);
+  return make_float3(top, mn, dec);
+}
+
+// _agx_tone_mapping
+__DEVICE__ float3 agx_tone_mapping(float3 rgb, agx_tone t, agx_mat rendering_to_xyz)
+{
+  const float h_before = t.restore_hue ? agx_rgb_to_hsv(rgb).x : 0.0f;
+
+  float3 px = make_float3(agx_apply_curve(agx_apply_log_encoding(rgb.x, t.range_in_ev, t.black_relative_ev), t),
+                          agx_apply_curve(agx_apply_log_encoding(rgb.y, t.range_in_ev, t.black_relative_ev), t),
+                          agx_apply_curve(agx_apply_log_encoding(rgb.z, t.range_in_ev, t.black_relative_ev), t));
+
+  if(t.look_tuned) px = agx_look(px, t, rendering_to_xyz);
+
+  px = make_float3(_powf(_fmaxf(0.0f, px.x), t.curve_gamma), _powf(_fmaxf(0.0f, px.y), t.curve_gamma),
+                   _powf(_fmaxf(0.0f, px.z), t.curve_gamma));
+
+  if(t.restore_hue)
+  {
+    float3 hsv = agx_rgb_to_hsv(px);
+    hsv.x = agx_lerp_hue(h_before, hsv.x, t.look_original_hue_mix_ratio);
+    return agx_hsv_to_rgb(hsv);
+  }
+  return px;
+}
+
+__DEVICE__ float agx_sanitize(float c)
+{
+  return isnan(c) ? 0.0f : agx_clampf(c, -1e6f, 1e6f);
+}
+
+// el ciclo por pixel de process(); entra y sale en Rec2020 lineal
+__DEVICE__ float3 agx_process(float3 in, agx_params p)
+{
+  const agx_tone t = agx_calculate_tone_mapping_params(p);
+  const agx_primaries pp = agx_get_primaries_params(p);
+  const agx_profile base = agx_base_profile(pp.base_primaries);
+  const agx_matrices m = agx_create_matrices(pp, base);
+
+  const float3 sanitised_in = make_float3(agx_sanitize(in.x), agx_sanitize(in.y), agx_sanitize(in.z));
+
+  // con base Rec2020 darktable no convierte: es el mismo perfil que el working profile
+  float3 base_rgb = pp.base_primaries == 0 ? sanitised_in : agx_apply(sanitised_in, base.pipe_to_base);
+  base_rgb = agx_compress_into_gamut(base_rgb);
+
+  float3 rendering_rgb = agx_apply(base_rgb, m.base_to_rendering);
+  rendering_rgb = agx_tone_mapping(rendering_rgb, t, m.rendering_to_xyz);
+  return agx_apply(rendering_rgb, m.rendering_to_pipe);
+}
+
+
+// ---- entrada y salida ----
+
+__DEVICE__ float agx_di_to_linear(float v)
+{
+  return v <= DI_LOG_CUT ? v / DI_M : _exp2f(v / DI_C - DI_B) - DI_A;
+}
+
+__DEVICE__ float agx_srgb_oetf(float x)
+{
+  return x <= 0.0031308f ? 12.92f * x : 1.055f * _powf(x, 1.0f / 2.4f) - 0.055f;
+}
+
+__DEVICE__ float3 agx_clip3(float3 v)
+{
+  return make_float3(agx_clip(v.x), agx_clip(v.y), agx_clip(v.z));
+}
+
+__DEVICE__ float3 agx_encode(float3 rec2020, int output)
+{
+  if(output == 4) return rec2020;
+  if(output == 3)
+  {
+    const float3 v = agx_clip3(rec2020);
+    return make_float3(_powf(v.x, 1.0f / 2.4f), _powf(v.y, 1.0f / 2.4f), _powf(v.z, 1.0f / 2.4f));
+  }
+  if(output == 2)
+  {
+    const float3 v = agx_clip3(agx_apply(rec2020, agx_base_profile(1).pipe_to_base));
+    return make_float3(agx_srgb_oetf(v.x), agx_srgb_oetf(v.y), agx_srgb_oetf(v.z));
+  }
+  // Rec.709 y sRGB comparten primarios: misma matriz que el perfil sRGB de darktable
+  const float3 v = agx_clip3(agx_apply(rec2020, agx_base_profile(3).pipe_to_base));
+  if(output == 1) return make_float3(agx_srgb_oetf(v.x), agx_srgb_oetf(v.y), agx_srgb_oetf(v.z));
+  return make_float3(_powf(v.x, 1.0f / 2.4f), _powf(v.y, 1.0f / 2.4f), _powf(v.z, 1.0f / 2.4f));
+}
+
+
+// ---- grafica de la curva, como "show curve" en darktable ----
+// x: exposicion de entrada en log (de black a white relative exposure)
+// y: salida de la curva antes de linealizar
+// guias: cada EV entero en x; 0.18 / 16 a 0.18 * 4 y 100% de salida lineal en y
+// en naranja, el tramo donde toe o shoulder perdieron la forma de S
+
+__DEVICE__ float agx_hypot(float x, float y)
+{
+  return _sqrtf(x * x + y * y);
+}
+
+__DEVICE__ float agx_dashed(float coord, float u)
+{
+  const float period = 8.0f * u;
+  return coord - period * _floorf(coord / period) < 0.5f * period ? 1.0f : 0.0f;
+}
+
+__DEVICE__ float agx_curve_distance(float gx, float gy, float gw, float gh, float nx, agx_tone t)
+{
+  // distancia en pixeles a la curva, aproximando la perpendicular con la pendiente local
+  const float yc = agx_apply_curve(nx, t) * gh;
+  const float dy = agx_apply_curve(nx + 1.0f / gw, t) * gh - yc;
+  return _fabs(gy - yc) / _sqrtf(1.0f + dy * dy);
+}
+
+__DEVICE__ float3 agx_draw_curve(float3 rgb, agx_tone t, int px, int py, int width, int height)
+{
+  const float u = _fmaxf(1.0f, (float)height / 1080.0f);
+  const float gw = 0.3f * (float)width;
+  const float gh = 0.6f * gw;
+  const float margin = 0.05f * (float)height;
+  const float pad = 8.0f * u;
+
+  // Resolve cuenta p_Y desde arriba; la grafica va abajo a la izquierda con y hacia arriba
+  const float gx = (float)px + 0.5f - margin;
+  const float gy = ((float)height - margin) - ((float)py + 0.5f);
+  if(gx < -pad || gx > gw + pad || gy < -pad || gy > gh + pad) return rgb;
+
+  const float3 bg = make_float3(0.13f, 0.13f, 0.13f);
+  const float3 guide = make_float3(0.32f, 0.32f, 0.32f);
+  const float3 border = make_float3(0.45f, 0.45f, 0.45f);
+  const float3 fg = make_float3(0.85f, 0.85f, 0.85f);
+  const float3 warn = make_float3(0.75f, 0.5f, 0.0f);
+  const float3 active = make_float3(1.0f, 1.0f, 1.0f);
+
+  const float nx = gx / gw;
+  const float ny = gy / gh;
+
+  // puntos: transicion del toe, del shoulder y el pivot
+  const float dt = agx_hypot(gx - t.toe_transition_x * gw, gy - t.toe_transition_y * gh);
+  const float ds = agx_hypot(gx - t.shoulder_transition_x * gw, gy - t.shoulder_transition_y * gh);
+  const float dp = agx_hypot(gx - t.pivot_x * gw, gy - t.pivot_y * gh);
+  if(_fminf(dp, _fminf(dt, ds)) <= 4.0f * u) return active;
+
+  const int inside = nx >= 0.0f && nx <= 1.0f && ny >= 0.0f && ny <= 1.0f;
+  if(!inside) return bg;
+
+  if(agx_curve_distance(gx, gy, gw, gh, nx, t) <= 1.0f * u)
+  {
+    const int fallback = (t.need_convex_toe && nx < t.toe_transition_x)
+                         || (t.need_concave_shoulder && nx > t.shoulder_transition_x);
+    return fallback ? warn : fg;
+  }
+
+  if(gx <= u || gx >= gw - u || gy <= u || gy >= gh - u) return border;
+
+  // diagonal
+  if(_fabs(gx * gh - gy * gw) / _sqrtf(gw * gw + gh * gh) <= 0.5f * u) return guide;
+
+  // guias verticales en cada EV entero
+  const float ev = t.black_relative_ev + nx * t.range_in_ev;
+  const float ev_px = _fabs(ev - _floorf(ev + 0.5f)) / t.range_in_ev * gw;
+  if(ev_px <= 0.5f * u && agx_dashed(gy, u) > 0.0f) return guide;
+
+  // guias horizontales en salida lineal 0.18 / 16 ... 0.18 * 4 y 1
+  float level = 0.18f / 16.0f;
+  for(int k = 0; k < 8; k++)
+  {
+    const float yg = _powf(k == 7 ? 1.0f : level, 1.0f / t.curve_gamma) * gh;
+    if(_fabs(gy - yg) <= 0.5f * u && agx_dashed(gx, u) > 0.0f) return guide;
+    level *= 2.0f;
+  }
+
+  return bg;
+}
+
+
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p_R, float p_G, float p_B)
+{
+  const float deg = AGX_PI / 180.0f;
+
+  agx_params p;
+  p.look_lift = p_look_lift;
+  p.look_slope = p_look_slope;
+  p.look_brightness = p_look_brightness;
+  p.look_saturation = p_look_saturation / 100.0f;
+  p.look_original_hue_mix_ratio = p_look_hue / 100.0f;
+  p.range_black_relative_ev = p_black_ev;
+  p.range_white_relative_ev = p_white_ev;
+  // darktable guarda el pivot normalizado; su slider lo muestra en EV
+  p.curve_pivot_x = agx_clampf((p_pivot_ev - p_black_ev) / (p_white_ev - p_black_ev), 0.0f, 1.0f);
+  p.curve_pivot_y_linear_output = p_pivot_out / 100.0f;
+  p.curve_contrast_around_pivot = p_contrast;
+  p.curve_linear_ratio_below_pivot = p_toe_start / 100.0f;
+  p.curve_linear_ratio_above_pivot = p_shoulder_start / 100.0f;
+  p.curve_toe_power = p_toe_power;
+  p.curve_shoulder_power = p_shoulder_power;
+  p.curve_gamma = p_curve_gamma;
+  p.auto_gamma = p_auto_gamma ? 1 : 0;
+  p.curve_target_display_black_ratio = p_target_black / 100.0f;
+  p.curve_target_display_white_ratio = p_target_white / 100.0f;
+  p.base_primaries = p_base == BASE_P3 ? 1 : (p_base == BASE_ADOBE ? 2 : (p_base == BASE_SRGB ? 3 : 0));
+  p.disable_primaries_adjustments = p_disable_primaries ? 1 : 0;
+  p.red_inset = p_red_inset / 100.0f;
+  p.red_rotation = p_red_rotation * deg;
+  p.green_inset = p_green_inset / 100.0f;
+  p.green_rotation = p_green_rotation * deg;
+  p.blue_inset = p_blue_inset / 100.0f;
+  p.blue_rotation = p_blue_rotation * deg;
+  p.master_outset_ratio = p_master_outset / 100.0f;
+  p.master_unrotation_ratio = p_master_unrotation / 100.0f;
+  p.red_outset = p_red_outset / 100.0f;
+  p.red_unrotation = p_red_unrotation * deg;
+  p.green_outset = p_green_outset / 100.0f;
+  p.green_unrotation = p_green_unrotation * deg;
+  p.blue_outset = p_blue_outset / 100.0f;
+  p.blue_unrotation = p_blue_unrotation * deg;
+  p.completely_reverse_primaries = p_reverse_all ? 1 : 0;
+
+  const int preset = p_preset == PRESET_SCENE_DEFAULT ? 1
+                   : p_preset == PRESET_BLENDER_BASE ? 2
+                   : p_preset == PRESET_BLENDER_PUNCHY ? 3
+                   : p_preset == PRESET_SIGMOID_DEFAULT ? 4
+                   : p_preset == PRESET_SIGMOID_SMOOTH ? 5
+                   : p_preset == PRESET_SMOOTH ? 6
+                   : p_preset == PRESET_UNMODIFIED ? 7 : 0;
+  if(preset != 0) p = agx_preset(preset, p);
+
+  float3 rgb = make_float3(p_R, p_G, p_B);
+  if(p_input == IN_DI_DWG)
+    rgb = make_float3(agx_di_to_linear(rgb.x), agx_di_to_linear(rgb.y), agx_di_to_linear(rgb.z));
+  if(p_input != IN_LIN_REC2020) rgb = agx_apply(rgb, agx_dwg_to_rec2020());
+  if(p_exposure != 0.0f)
+  {
+    const float gain = _exp2f(p_exposure);
+    rgb = make_float3(rgb.x * gain, rgb.y * gain, rgb.z * gain);
+  }
+
+  rgb = agx_process(rgb, p);
+
+  const int output = p_output == OUT_SRGB ? 1
+                   : p_output == OUT_P3 ? 2
+                   : p_output == OUT_REC2020 ? 3
+                   : p_output == OUT_LINEAR ? 4 : 0;
+  rgb = agx_encode(rgb, output);
+
+  if(p_show_curve) rgb = agx_draw_curve(rgb, agx_calculate_tone_mapping_params(p), p_X, p_Y, p_Width, p_Height);
+  return rgb;
+}
